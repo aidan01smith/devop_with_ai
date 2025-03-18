@@ -1,0 +1,283 @@
+---
+# Theme 02: User Management and Access Control
+# This playbook configures user accounts, permissions, and access controls
+# across Windows and Linux environments
+
+- name: Windows User Management and Access Control
+  hosts: windows
+  gather_facts: yes
+  vars:
+    domain_name: "yourdomain.local"  # Replace with your actual domain name
+  tasks:
+    # System Administration - Creating Local Admin Account
+    - name: Create a backup local admin account
+      win_user:
+        name: backup_admin
+        password: "{{ 'P@ssw0rd123!' | win_hash('sha256') }}"  # Better to use vault in production
+        groups:
+          - Administrators
+        state: present
+        password_never_expires: no
+        account_disabled: no
+      tags:
+        - users
+        - system_admin
+      when: inventory_hostname == "MGMT01"  # Only on management server
+
+    - name: Configure User Right Assignment for Backup Operators
+      win_shell: |
+        $import = @'
+        [CmdletBinding()]
+        param (
+            [Parameter(Mandatory = $true)]
+            [string]$Principal,
+            
+            [Parameter(Mandatory = $true)]
+            [string]$Right
+        )
+        
+        $sid = (New-Object System.Security.Principal.NTAccount($Principal)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+        secedit /export /cfg C:\secedit.cfg
+        $content = Get-Content C:\secedit.cfg
+        
+        $pattern = "^$Right\s*=.*"
+        $match = $content | Select-String -Pattern $pattern
+        
+        if ($match) {
+            $line = $match.Line
+            if ($line -notlike "*$sid*") {
+                $line = $line.TrimEnd()*,*$sid"
+                $content = $content -replace $pattern, $line
+            }
+        }
+        else {
+            $content += "$Right = *$sid"
+        }
+        
+        $content | Set-Content C:\secedit.cfg
+        secedit /configure /db c:\windows\security\local.sdb /cfg C:\secedit.cfg /areas USER_RIGHTS
+        Remove-Item C:\secedit.cfg -Force
+        '@
+        
+        $import | Set-Content -Path C:\AddUserRight.ps1
+        powershell -ExecutionPolicy Bypass -File C:\AddUserRight.ps1 -Principal "Backup Operators" -Right "SeBackupPrivilege"
+        powershell -ExecutionPolicy Bypass -File C:\AddUserRight.ps1 -Principal "Backup Operators" -Right "SeRestorePrivilege"
+        Remove-Item C:\AddUserRight.ps1 -Force
+      register: user_rights_result
+      tags:
+        - user_rights
+        - system_admin
+      when: inventory_hostname == "MGMT01"
+
+    - name: Display User Rights Assignment Results
+      debug:
+        var: user_rights_result
+      when: user_rights_result is defined and inventory_hostname == "MGMT01"
+      tags:
+        - user_rights
+        - debug
+
+    # System Hardening - Account Restrictions
+    - name: Rename Administrator Account
+      win_shell: |
+        $adminAccount = Get-WmiObject Win32_UserAccount -Filter "Name='Administrator'"
+        if ($adminAccount) {
+            $adminAccount.Rename("SysManager")
+        }
+      tags:
+        - account_security
+        - hardening
+      when: inventory_hostname != "AD01"  # Skip on domain controller
+
+    # System Hardening - Restrict Remote Desktop Users
+    - name: Configure Remote Desktop Users
+      win_group_membership:
+        name: "Remote Desktop Users"
+        members:
+          - "{{ domain_name }}\\Domain Admins"
+          - "{{ domain_name }}\\IT Support"
+        state: present
+      ignore_errors: yes  # Continue if group doesn't exist or domain issues
+      tags:
+        - rdp_security
+        - hardening
+
+    # AD DS GPO Hardening - Password Policy
+    - name: Set Domain Password Policy
+      win_shell: |
+        # This would normally use Group Policy, but we're using direct commands
+        net accounts /minpwlen:14 /maxpwage:60 /minpwage:1 /uniquepw:24 /lockoutthreshold:5 /lockoutduration:30 /lockoutwindow:30
+      when: inventory_hostname == "AD01"  # Only on domain controller
+      register: password_policy
+      tags:
+        - gpo
+        - password_policy
+
+    - name: Display Password Policy Configuration
+      debug:
+        var: password_policy
+      when: password_policy is defined and inventory_hostname == "AD01"
+      tags:
+        - gpo
+        - debug
+
+    # AD DS GPO Hardening - User Account Control
+    - name: Configure UAC Policy Settings
+      win_regedit:
+        path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+        name: "{{ item.name }}"  
+        data: "{{ item.data }}"
+        type: "{{ item.type }}"
+      loop:
+        - { name: FilterAdministratorToken, data: 1, type: dword }  # UAC filtering for built-in admin
+        - { name: EnableUIADesktopToggle, data: 0, type: dword }    # Disable ability to toggle UAC from desktop
+      tags:
+        - gpo
+        - uac_policy
+
+    # AD DS GPO Hardening - Credential Guard
+    - name: Enable Credential Guard 
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard
+        name: EnableVirtualizationBasedSecurity
+        data: 1
+        type: dword
+      tags: 
+        - gpo
+        - credential_guard
+
+- name: Rocky Linux User Management and Access Control
+  hosts: rocky
+  become: yes
+  gather_facts: yes
+  vars:
+    admin_user: secadmin
+    admin_group: secadmins
+  tasks:
+    # System Administration - Create Admin Group and User
+    - name: Create security admin group
+      group:
+        name: "{{ admin_group }}"
+        state: present
+      tags:
+        - users
+        - system_admin
+
+    - name: Create security admin user
+      user:
+        name: "{{ admin_user }}"
+        groups: "{{ admin_group }},wheel"
+        append: yes
+        state: present
+        create_home: yes
+        shell: /bin/bash
+        password: "{{ 'SecureP@ssword123' | password_hash('sha512') }}"  # Better to use vault
+        update_password: on_create
+      tags:
+        - users
+        - system_admin
+
+    # System Administration - Configure sudo Access
+    - name: Configure sudo access for security admins
+      lineinfile:
+        path: /etc/sudoers.d/secadmins
+        line: "%{{ admin_group }} ALL=(ALL) PASSWD: ALL"
+        create: yes
+        validate: /usr/sbin/visudo -cf %s
+        mode: '0440'
+      tags:
+        - sudo
+        - system_admin
+
+    # System Hardening - Login Security Controls
+    - name: Configure login security controls
+      lineinfile:
+        path: /etc/login.defs
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^PASS_MAX_DAYS', line: 'PASS_MAX_DAYS   60' }
+        - { regexp: '^PASS_MIN_DAYS', line: 'PASS_MIN_DAYS   1' }
+        - { regexp: '^PASS_MIN_LEN', line: 'PASS_MIN_LEN    12' }
+        - { regexp: '^PASS_WARN_AGE', line: 'PASS_WARN_AGE   7' }
+      tags:
+        - password_policy
+        - hardening
+
+    # System Hardening - PAM Configuration for Password Quality
+    - name: Install PAM password quality module
+      dnf:
+        name: libpwquality
+        state: present
+      tags:
+        - password_policy
+        - hardening
+
+    - name: Configure PAM password quality requirements
+      lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^# minlen =', line: 'minlen = 12' }
+        - { regexp: '^# dcredit =', line: 'dcredit = -1' }  # At least 1 digit
+        - { regexp: '^# ucredit =', line: 'ucredit = -1' }  # At least 1 uppercase
+        - { regexp: '^# lcredit =', line: 'lcredit = -1' }  # At least 1 lowercase
+        - { regexp: '^# ocredit =', line: 'ocredit = -1' }  # At least 1 special character
+        - { regexp: '^# difok =', line: 'difok = 3' }      # At least 3 chars different from old password
+      tags:
+        - password_policy
+        - hardening
+
+    - name: Enable failed login tracking
+      lineinfile:
+        path: /etc/pam.d/password-auth
+        line: "auth required pam_tally2.so deny=5 unlock_time=1800 even_deny_root"
+        insertafter: "^auth.*required.*pam_env.so"
+      register: pam_config
+      ignore_errors: yes  # Newer versions may use different modules
+      tags:
+        - login_security
+        - hardening
+
+    - name: Display PAM Configuration Status
+      debug:
+        var: pam_config
+      when: pam_config is defined
+      tags:
+        - login_security
+        - debug
+
+    # System Administration - File System Permissions
+    - name: Secure sensitive directories 
+      file:
+        path: "{{ item.path }}"
+        mode: "{{ item.mode }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        recurse: "{{ item.recurse | default(no) }}"
+      loop:
+        - { path: "/etc/cron.d", mode: "0700", owner: "root", group: "root", recurse: no }
+        - { path: "/etc/cron.daily", mode: "0700", owner: "root", group: "root", recurse: no }
+        - { path: "/etc/cron.hourly", mode: "0700", owner: "root", group: "root", recurse: no }
+        - { path: "/etc/cron.monthly", mode: "0700", owner: "root", group: "root", recurse: no }
+        - { path: "/etc/cron.weekly", mode: "0700", owner: "root", group: "root", recurse: no }
+      tags:
+        - file_permissions
+        - hardening
+
+    - name: Secure sensitive files
+      file:
+        path: "{{ item.path }}"
+        mode: "{{ item.mode }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+      loop:
+        - { path: "/etc/crontab", mode: "0600", owner: "root", group: "root" }
+        - { path: "/etc/passwd", mode: "0644", owner: "root", group: "root" }
+        - { path: "/etc/shadow", mode: "0000", owner: "root", group: "root" }
+        - { path: "/etc/gshadow", mode: "0000", owner: "root", group: "root" }
+        - { path: "/etc/group", mode: "0644", owner: "root", group: "root" }
+      tags:
+        - file_permissions
+        - hardening
