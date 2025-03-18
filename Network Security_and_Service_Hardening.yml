@@ -1,0 +1,266 @@
+---
+# Theme 04: Network Security and Service Hardening
+# This playbook implements network security measures and service hardening
+# across Windows and Linux systems in our lab environment
+
+- name: Network Security and Service Hardening for Windows Hosts
+  hosts: windows
+  gather_facts: yes
+  vars:
+    win_firewall_rules:
+      - name: "Block Telnet"
+        enable: yes
+        direction: in
+        action: block
+        protocol: tcp
+        port: 23
+        state: present
+      - name: "Allow RDP Only from Management"
+        enable: yes
+        direction: in
+        action: allow
+        protocol: tcp
+        port: 3389
+        remote_ip: "{{ hostvars['MGMT01']['ansible_host'] }}"
+        state: present
+  
+  tasks:
+    # System Administration Element 1: Configure Windows Firewall
+    - name: Configure Windows Firewall Rules
+      win_firewall_rule:
+        name: "{{ item.name }}"
+        enable: "{{ item.enable }}"
+        direction: "{{ item.direction }}"
+        action: "{{ item.action }}"
+        protocol: "{{ item.protocol }}"
+        localport: "{{ item.port }}"
+        remoteip: "{{ item.remote_ip | default(omit) }}"
+        state: "{{ item.state }}"
+      loop: "{{ win_firewall_rules }}"
+      register: firewall_config
+      
+    - name: Debug Firewall Configuration
+      debug:
+        var: firewall_config
+        verbosity: 1
+    
+    # System Administration Element 2: Configure Network Service Optimization
+    - name: Disable IPv6 on all interfaces
+      win_command: netsh interface ipv6 set global state=disabled
+      register: ipv6_result
+      changed_when: ipv6_result.rc == 0
+      failed_when: ipv6_result.rc != 0 and "already disabled" not in ipv6_result.stderr
+      
+    - name: Optimize TCP settings
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+        type: "{{ item.type }}"
+      loop:
+        - { name: 'TcpMaxDataRetransmissions', data: 3, type: 'dword' }
+        - { name: 'EnableTCPA', data: 0, type: 'dword' }
+        - { name: 'SynAttackProtect', data: 1, type: 'dword' }
+      register: tcp_settings
+      
+    # System Hardening Element 1: Disable Unnecessary Services
+    - name: Disable unnecessary Windows services
+      win_service:
+        name: "{{ item }}"
+        start_mode: disabled
+        state: stopped
+      loop:
+        - XblAuthManager
+        - XblGameSave
+        - XboxGipSvc
+        - MapsBroker
+        - lfsvc
+        - SharedAccess # Internet Connection Sharing
+      register: service_result
+      failed_when: 
+        - service_result.failed is defined
+        - service_result.failed
+        - "'service was not found' not in service_result.msg"
+      
+    # System Hardening Element 2: Configure SMB Security
+    - name: Disable SMBv1 protocol
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+        name: SMB1
+        data: 0
+        type: dword
+      register: smb1_config
+      
+    - name: Enable SMB Signing
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+        name: "{{ item.name }}"
+        data: "{{ item.data }}"
+        type: dword
+      loop:
+        - { name: 'RequireSecuritySignature', data: 1 }
+        - { name: 'EnableSecuritySignature', data: 1 }
+      register: smb_signing
+
+    # AD DS GPO Hardening Elements for Domain-joined Windows hosts
+    - name: Create GPO for Network Security - Only run on AD01
+      win_command: powershell.exe -Command "New-GPO -Name 'Network Security Settings'"
+      register: create_gpo
+      when: inventory_hostname == 'AD01'
+      failed_when: create_gpo.rc != 0 and "already exists" not in create_gpo.stderr
+      changed_when: create_gpo.rc == 0
+      
+    - name: Configure Network Security GPO Settings - Element 1: Firewall profile settings
+      win_command: >
+        powershell.exe -Command "Set-GPRegistryValue -Name 'Network Security Settings' 
+        -Key 'HKLM\Software\Policies\Microsoft\WindowsFirewall\DomainProfile' 
+        -ValueName 'EnableFirewall' -Type DWord -Value 1"
+      when: inventory_hostname == 'AD01'
+      register: gpo_firewall_enable
+    
+    - name: Configure Network Security GPO Settings - Element 2: Block outbound connections by default
+      win_command: >
+        powershell.exe -Command "Set-GPRegistryValue -Name 'Network Security Settings' 
+        -Key 'HKLM\Software\Policies\Microsoft\WindowsFirewall\DomainProfile' 
+        -ValueName 'DefaultOutboundAction' -Type DWord -Value 1"
+      when: inventory_hostname == 'AD01'
+      register: gpo_outbound_block
+      
+    - name: Configure Network Security GPO Settings - Element 3: Enable Windows Defender Network Protection
+      win_command: >
+        powershell.exe -Command "Set-GPRegistryValue -Name 'Network Security Settings' 
+        -Key 'HKLM\Software\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\Network Protection' 
+        -ValueName 'EnableNetworkProtection' -Type DWord -Value 1"
+      when: inventory_hostname == 'AD01'
+      register: gpo_network_protection
+      
+    - name: Link Network Security GPO to domain
+      win_command: >
+        powershell.exe -Command "New-GPLink -Name 'Network Security Settings' -Target 'DC=contoso,DC=local' -Enforced Yes"
+      when: inventory_hostname == 'AD01'
+      register: gpo_link
+      failed_when: gpo_link.rc != 0 and "already exists" not in gpo_link.stderr
+      changed_when: gpo_link.rc == 0
+
+- name: Network Security and Service Hardening for Rocky Linux Hosts
+  hosts: rocky
+  become: yes
+  gather_facts: yes
+  vars:
+    firewalld_services:
+      - ssh
+    firewalld_ports:
+      - port: 22/tcp
+        state: enabled
+        permanent: yes
+        zone: public
+      - port: 80/tcp
+        state: disabled
+        permanent: yes
+        zone: public
+  
+  tasks:
+    # System Administration Element 1: Configure firewalld
+    - name: Install firewalld if not present
+      dnf:
+        name: firewalld
+        state: present
+      register: firewalld_install
+      
+    - name: Enable and start firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+      register: firewalld_service
+      
+    - name: Configure firewalld services
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        state: enabled
+      loop: "{{ firewalld_services }}"
+      register: firewalld_config_services
+      notify: reload firewalld
+      
+    - name: Configure firewalld ports
+      firewalld:
+        port: "{{ item.port }}"
+        permanent: "{{ item.permanent }}"
+        state: "{{ item.state }}"
+        zone: "{{ item.zone }}"
+      loop: "{{ firewalld_ports }}"
+      register: firewalld_config_ports
+      notify: reload firewalld
+      
+    # System Administration Element 2: Configure sysctl network parameters
+    - name: Set network security sysctl parameters
+      sysctl:
+        name: "{{ item.param }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { param: 'net.ipv4.conf.all.rp_filter', value: '1' }
+        - { param: 'net.ipv4.conf.default.rp_filter', value: '1' }
+        - { param: 'net.ipv4.icmp_echo_ignore_broadcasts', value: '1' }
+        - { param: 'net.ipv4.tcp_syncookies', value: '1' }
+        - { param: 'net.ipv4.conf.all.accept_redirects', value: '0' }
+        - { param: 'net.ipv4.conf.all.send_redirects', value: '0' }
+        - { param: 'net.ipv4.conf.all.accept_source_route', value: '0' }
+        - { param: 'net.ipv6.conf.all.disable_ipv6', value: '1' }
+      register: sysctl_config
+    
+    # System Hardening Element 1: Configure SSH security
+    - name: Secure SSH configuration
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+        validate: '/usr/sbin/sshd -t -f %s'
+      loop:
+        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
+        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+        - { regexp: '^#?X11Forwarding', line: 'X11Forwarding no' }
+        - { regexp: '^#?MaxAuthTries', line: 'MaxAuthTries 3' }
+        - { regexp: '^#?Protocol', line: 'Protocol 2' }
+      register: ssh_config
+      notify: restart sshd
+      
+    # System Hardening Element 2: Configure TCP Wrappers
+    - name: Install TCP Wrappers
+      dnf:
+        name: tcp_wrappers
+        state: present
+      register: tcp_wrappers_install
+      failed_when: tcp_wrappers_install.failed and "No match for argument" not in tcp_wrappers_install.msg
+      
+    - name: Configure hosts.allow - limit SSH access
+      lineinfile:
+        path: /etc/hosts.allow
+        line: "sshd: 10.0.0.0/24 192.168.0.0/24"
+        state: present
+        create: yes
+      register: hosts_allow
+      when: tcp_wrappers_install is succeeded
+      
+    - name: Configure hosts.deny - block all other connections
+      lineinfile:
+        path: /etc/hosts.deny
+        line: "ALL: ALL"
+        state: present
+        create: yes
+      register: hosts_deny
+      when: tcp_wrappers_install is succeeded
+      
+  handlers:
+    - name: reload firewalld
+      service:
+        name: firewalld
+        state: reloaded
+        
+    - name: restart sshd
+      service:
+        name: sshd
+        state: restarted
