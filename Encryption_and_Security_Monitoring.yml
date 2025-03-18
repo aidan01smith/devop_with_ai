@@ -1,0 +1,305 @@
+---
+# Theme 05: Encryption and Security Monitoring
+# This playbook implements encryption features and security monitoring
+# across Windows and Linux systems in our lab environment
+
+- name: Encryption and Security Monitoring for Windows Hosts
+  hosts: windows
+  gather_facts: yes
+  vars:
+    event_logs_to_configure:
+      - name: Security
+        max_size: 1073741824  # 1GB
+        retention: Overwrite
+      - name: System
+        max_size: 536870912   # 512MB
+        retention: Overwrite
+    monitored_folders:
+      - C:\Windows\System32\config
+      - C:\Windows\System32\drivers
+      - C:\Program Files
+  
+  tasks:
+    # System Administration Element 1: Configure Event Log Settings
+    - name: Configure Windows Event Logs
+      win_eventlog:
+        name: "{{ item.name }}"
+        maximum_size_in_bytes: "{{ item.max_size }}"
+        overflow_action: "{{ item.retention }}"
+      loop: "{{ event_logs_to_configure }}"
+      register: eventlog_config
+      
+    - name: Enable PowerShell Script Block Logging
+      win_regedit:
+        path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging
+        name: EnableScriptBlockLogging
+        data: 1
+        type: dword
+      register: powershell_logging
+      
+    # System Administration Element 2: Set Up File Integrity Monitoring
+    - name: Create SCHTASKS for File Integrity Check
+      win_scheduled_task:
+        name: FileIntegrityMonitor
+        description: Daily file integrity check on critical system folders
+        actions:
+          - path: powershell.exe
+            arguments: >-
+              -ExecutionPolicy Bypass -Command "Get-ChildItem -Path 'C:\Windows\System32\config', 'C:\Windows\System32\drivers' -Recurse -File |
+              Get-FileHash | Export-Csv -Path 'C:\ProgramData\FileIntegrityCheck\$(Get-Date -Format 'yyyyMMdd').csv' -NoTypeInformation"
+        triggers:
+          - type: daily
+            start_boundary: '2023-12-01T03:00:00'
+        username: SYSTEM
+        state: present
+        enabled: yes
+      register: file_monitor_task
+      
+    - name: Create Directory for File Integrity Check
+      win_file:
+        path: C:\ProgramData\FileIntegrityCheck
+        state: directory
+      register: file_check_dir
+    
+    # System Hardening Element 1: Configure Certificate-Based Encryption
+    - name: Check for Windows CertReq.exe utility
+      win_stat:
+        path: C:\Windows\System32\certreq.exe
+      register: certreq_check
+    
+    - name: Create self-signed certificate request file
+      win_copy:
+        content: |
+          [NewRequest]
+          Subject = "CN=ServerEncryption"
+          KeySpec = 1
+          KeyLength = 4096
+          Exportable = TRUE
+          MachineKeySet = TRUE
+          SMIME = False
+          PrivateKeyArchive = FALSE
+          UserProtected = FALSE
+          UseExistingKeySet = FALSE
+          ProviderName = "Microsoft RSA SChannel Cryptographic Provider"
+          ProviderType = 12
+          RequestType = PKCS10
+          KeyUsage = 0xA0
+          HashAlgorithm = SHA256
+        dest: C:\Windows\Temp\server_cert_request.inf
+      register: cert_req_file
+      when: certreq_check.stat.exists
+    
+    - name: Generate self-signed certificate
+      win_command: certreq -new C:\Windows\Temp\server_cert_request.inf C:\Windows\Temp\server_cert.cer
+      register: create_cert
+      when: certreq_check.stat.exists and cert_req_file is succeeded
+      changed_when: create_cert.rc == 0
+      failed_when: create_cert.rc != 0 and "already exists" not in create_cert.stderr
+    
+    # System Hardening Element 2: Enable EFS for Sensitive Files
+    - name: Create test sensitive documents folder
+      win_file:
+        path: C:\ProgramData\SensitiveDocuments
+        state: directory
+      register: sensitive_dir
+    
+    - name: Enable EFS on sensitive folders
+      win_command: cipher /e /s:C:\ProgramData\SensitiveDocuments
+      register: efs_enable
+      when: sensitive_dir is succeeded
+      changed_when: efs_enable.rc == 0
+      failed_when: efs_enable.rc != 0 and "already" not in efs_enable.stderr
+    
+    # AD DS GPO Hardening Elements for Windows Domain joined hosts
+    - name: Create GPO for Encryption and Monitoring - Only run on AD01
+      win_command: powershell.exe -Command "New-GPO -Name 'Encryption and Monitoring Settings'"
+      register: create_gpo
+      when: inventory_hostname == 'AD01'
+      failed_when: create_gpo.rc != 0 and "already exists" not in create_gpo.stderr
+      changed_when: create_gpo.rc == 0
+      
+    - name: Configure Encryption GPO - Element 1: Enable EFS
+      win_command: >
+        powershell.exe -Command "Set-GPRegistryValue -Name 'Encryption and Monitoring Settings' 
+        -Key 'HKLM\Software\Policies\Microsoft\Windows NT\EFS' 
+        -ValueName 'EfsConfiguration' -Type DWord -Value 1"
+      when: inventory_hostname == 'AD01'
+      register: gpo_efs_enable
+    
+    - name: Configure Monitoring GPO - Element 2: Audit policy for object access
+      win_command: >
+        powershell.exe -Command "Set-GPRegistryValue -Name 'Encryption and Monitoring Settings' 
+        -Key 'HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit' 
+        -ValueName 'ProcessCreationIncludeCmdLine_Enabled' -Type DWord -Value 1"
+      when: inventory_hostname == 'AD01'
+      register: gpo_process_audit
+      
+    - name: Configure Security GPO - Element 3: PowerShell security settings
+      win_command: >
+        powershell.exe -Command "Set-GPRegistryValue -Name 'Encryption and Monitoring Settings' 
+        -Key 'HKLM\Software\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging' 
+        -ValueName 'EnableScriptBlockLogging' -Type DWord -Value 1"
+      when: inventory_hostname == 'AD01'
+      register: gpo_powershell_logging
+      
+    - name: Link Encryption and Monitoring GPO to domain
+      win_command: >
+        powershell.exe -Command "New-GPLink -Name 'Encryption and Monitoring Settings' -Target 'DC=contoso,DC=local' -Enforced Yes"
+      when: inventory_hostname == 'AD01'
+      register: gpo_link
+      failed_when: gpo_link.rc != 0 and "already exists" not in gpo_link.stderr
+      changed_when: gpo_link.rc == 0
+
+- name: Encryption and Security Monitoring for Rocky Linux Hosts
+  hosts: rocky
+  become: yes
+  gather_facts: yes
+  vars:
+    auditd_rules:
+      - "-a always,exit -F arch=b64 -S execve -k exec"
+      - "-w /etc/passwd -p wa -k identity"
+      - "-w /etc/shadow -p wa -k identity"
+      - "-w /etc/sudoers -p wa -k sudoers"
+      - "-w /var/log/secure -p wa -k log_tampering"
+    encryption_packages:
+      - cryptsetup
+      - gnupg2
+      - rsync
+  
+  tasks:
+    # System Administration Element 1: Install and Configure Auditd
+    - name: Install auditd package
+      dnf:
+        name: audit
+        state: present
+      register: auditd_install
+      
+    - name: Enable and start auditd service
+      service:
+        name: auditd
+        state: started
+        enabled: yes
+      register: auditd_service
+      
+    - name: Configure auditd rules
+      lineinfile:
+        path: /etc/audit/rules.d/audit.rules
+        line: "{{ item }}"
+        state: present
+      loop: "{{ auditd_rules }}"
+      register: auditd_rules_config
+      notify: restart auditd
+      
+    # System Administration Element 2: Setup Logrotate for Security Logs
+    - name: Configure logrotate for security logs
+      copy:
+        content: |
+          /var/log/secure {
+            rotate 14
+            daily
+            compress
+            delaycompress
+            missingok
+            notifempty
+            create 0600 root root
+            postrotate
+              /usr/bin/systemctl restart rsyslog >/dev/null 2>&1 || true
+            endscript
+          }
+        dest: /etc/logrotate.d/secure-logs
+        owner: root
+        group: root
+        mode: '0644'
+      register: logrotate_config
+    
+    # System Hardening Element 1: Setup Encrypted Directory with LUKS
+    - name: Install encryption packages
+      dnf:
+        name: "{{ encryption_packages }}"
+        state: present
+      register: encryption_pkgs
+    
+    - name: Create a file for encrypted storage (demo purposes only)
+      command: dd if=/dev/zero of=/root/encrypted-container bs=1M count=50
+      args:
+        creates: /root/encrypted-container
+      register: create_container
+      
+    - name: Set up cryptographic container with LUKS (demo purposes only)
+      shell: |
+        echo "password123" | cryptsetup luksFormat --batch-mode /root/encrypted-container
+      args:
+        creates: /root/encrypted-container.key
+        executable: /bin/bash
+      register: luks_format
+      when: create_container.changed
+      
+    - name: Create key file for auto-mounting (demo purposes only)
+      copy:
+        content: "password123"
+        dest: /root/encrypted-container.key
+        owner: root
+        group: root
+        mode: '0400'
+      register: key_file
+      when: luks_format is changed
+      
+    - name: Create mount point for encrypted storage
+      file:
+        path: /mnt/encrypted
+        state: directory
+      register: mount_point
+      
+    # System Hardening Element 2: Set Up File Integrity Monitoring with AIDE
+    - name: Install AIDE package
+      dnf:
+        name: aide
+        state: present
+      register: aide_install
+      
+    - name: Configure AIDE database
+      copy:
+        content: |
+          # AIDE configuration for critical system files
+          /bin NORMAL
+          /sbin NORMAL
+          /usr/bin NORMAL
+          /usr/sbin NORMAL
+          /etc NORMAL
+          !/var/log
+          !/proc
+          !/sys
+        dest: /etc/aide.conf.local
+        owner: root
+        group: root
+        mode: '0644'
+      register: aide_config
+      when: aide_install is succeeded
+      
+    - name: Initialize AIDE database
+      command: aide --init
+      args:
+        creates: /var/lib/aide/aide.db.new.gz
+      register: aide_init
+      when: aide_config is succeeded and aide_install is succeeded
+      
+    - name: Create daily AIDE check via cron
+      cron:
+        name: "Daily AIDE integrity check"
+        hour: "3"
+        minute: "0"
+        job: "/usr/sbin/aide --check | mail -s 'AIDE Integrity Check Report for $(hostname)' root"
+        user: root
+      register: aide_cron
+      when: aide_init is succeeded or aide_install is succeeded
+      
+  handlers:
+    - name: restart auditd
+      service:
+        name: auditd
+        state: restarted
+        
+    - name: restart rsyslog
+      service:
+        name: rsyslog
+        state: restarted
