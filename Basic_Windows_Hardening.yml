@@ -1,0 +1,40 @@
+---
+# Theme 01: Basic Windows Hardening
+- name: Basic Windows Security Hardening
+  hosts: windows
+  gather_facts: yes
+  tasks:
+    # System Administration
+    - name: Ensure Windows Firewall is enabled
+      win_firewall:
+        state: enabled
+        profiles:
+          - Domain
+          - Private
+          - Public
+
+    - name: Enable Windows updates
+      win_updates:
+        category_names:
+          - SecurityUpdates
+        state: installed
+      register: update_result
+      
+    # System Hardening
+    - name: Disable unnecessary services
+      win_service:
+        name: "{{ item }}"
+        state: stopped
+        start_mode: disabled
+      loop:
+        - fax
+        - XblGameSave
+        - XboxNetApiSvc
+        
+    # AD DS GPO Hardening (via registry)
+    - name: Set account lockout policy
+      win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters
+        name: MaximumPasswordAge
+        data: 90
+        type: dword
