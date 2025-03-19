@@ -1,0 +1,64 @@
+---
+# Theme 03: Windows Authentication Settings
+- name: Configure Windows Authentication Settings
+  hosts: windows
+  gather_facts: yes
+  tasks:
+    # System Administration
+    - name: Check current Ctrl+Alt+Delete setting
+      win_shell: "Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'DisableCAD' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DisableCAD"
+      register: cad_status
+      failed_when: false
+      
+    - name: Display current Ctrl+Alt+Delete setting
+      debug:
+        msg: "Current DisableCAD setting: {{ cad_status.stdout | default('0') }}"
+        
+    # System Hardening - Disable Ctrl+Alt+Delete requirement
+    - name: Disable Ctrl+Alt+Delete requirement for login
+      win_regedit:
+        path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+        name: DisableCAD
+        data: 1
+        type: dword
+      register: cad_changed
+        
+    - name: Report change status
+      debug:
+        msg: "Ctrl+Alt+Delete requirement has been disabled"
+      when: cad_changed.changed
+      
+    # Additional security measures to compensate
+    - name: Enforce strong password policy
+      win_security_policy:
+        section: System Access
+        key: PasswordComplexity
+        value: 1
+        
+    - name: Set account lockout threshold
+      win_security_policy:
+        section: System Access
+        key: LockoutBadCount
+        value: 5
+        
+    # AD DS GPO settings (via registry)
+    - name: Set screen saver timeout
+      win_regedit:
+        path: HKCU:\Software\Policies\Microsoft\Windows\Control Panel\Desktop
+        name: ScreenSaveTimeOut
+        data: 600
+        type: string
+      
+    - name: Force screen saver
+      win_regedit:
+        path: HKCU:\Software\Policies\Microsoft\Windows\Control Panel\Desktop
+        name: ScreenSaverIsSecure
+        data: 1
+        type: string
+      
+    - name: Set screensaver grace period
+      win_regedit:
+        path: HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon
+        name: ScreenSaverGracePeriod
+        data: 5
+        type: string
