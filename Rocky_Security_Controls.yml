@@ -5,10 +5,15 @@
   become: yes
   tasks:
     # System Administration
-    - name: Configure logrotate for system logs
-      blockinfile:
-        path: /etc/logrotate.d/syslog
-        block: |
+    - name: Install logrotate if not present
+      dnf:
+        name: logrotate
+        state: present
+
+    - name: Create custom logrotate configuration
+      copy:
+        dest: /etc/logrotate.d/custom_syslog
+        content: |
           /var/log/messages {
             rotate 7
             daily
@@ -16,7 +21,24 @@
             notifempty
             missingok
           }
+        mode: '0644'
       
+    - name: Create health check script
+      copy:
+        dest: /usr/local/bin/health_check.sh
+        content: |
+          #!/bin/bash
+          echo "=== System Health Check $(date) ==="
+          echo "=== Disk Usage ==="
+          df -h
+          echo "=== Memory Usage ==="
+          free -m
+          echo "=== CPU Load ==="
+          uptime
+          echo "=== Active Services ==="
+          systemctl list-units --type=service --state=running
+        mode: '0755'
+        
     - name: Set up regular system health checks
       cron:
         name: "System health check"
@@ -25,11 +47,17 @@
         job: "/usr/local/bin/health_check.sh > /var/log/health_check.log 2>&1"
         
     # System Hardening
+    - name: Install password quality package
+      dnf:
+        name: libpwquality
+        state: present
+        
     - name: Configure password policies
       lineinfile:
         path: /etc/security/pwquality.conf
         regexp: "{{ item.regexp }}"
         line: "{{ item.line }}"
+        create: yes
       loop:
         - { regexp: '^# minlen', line: 'minlen = 12' }
         - { regexp: '^# dcredit', line: 'dcredit = -1' }
@@ -44,14 +72,21 @@
             name: audit
             state: present
             
+        - name: Create custom audit rules directory if it doesn't exist
+          file:
+            path: /etc/audit/rules.d
+            state: directory
+            mode: '0750'
+            
         - name: Configure basic audit rules
           copy:
             dest: /etc/audit/rules.d/custom.rules
             content: |
               # Log authentication events
-              -w /var/log/auth.log -p wa -k authentication
+              -w /var/log/secure -p wa -k authentication
               # Monitor sudo usage
               -w /etc/sudoers -p wa -k sudoers
+            mode: '0640'
             
         - name: Enable and start auditd service
           service:
