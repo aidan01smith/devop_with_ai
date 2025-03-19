@@ -4,6 +4,39 @@
   hosts: rocky
   become: yes
   tasks:
+    # Fix EPEL repository issues
+    - name: Install EPEL repository
+      dnf:
+        name: epel-release
+        state: present
+        disable_gpg_check: yes
+      register: epel_result
+      ignore_errors: yes
+      
+    - name: Configure EPEL repository manually if installation fails
+      block:
+        - name: Create EPEL repo file
+          copy:
+            dest: /etc/yum.repos.d/epel.repo
+            content: |
+              [epel]
+              name=Extra Packages for Enterprise Linux $releasever - $basearch
+              metalink=https://mirrors.fedoraproject.org/metalink?repo=epel-$releasever&arch=$basearch
+              failovermethod=priority
+              enabled=1
+              gpgcheck=0
+            mode: '0644'
+          when: epel_result is failed
+          
+        - name: Clean DNF cache
+          command: dnf clean all
+          when: epel_result is failed
+          
+        - name: Update DNF cache
+          command: dnf makecache
+          when: epel_result is failed
+      when: epel_result is failed
+
     # System Administration
     - name: Install logrotate if not present
       dnf:
