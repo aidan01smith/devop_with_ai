@@ -1,0 +1,64 @@
+---
+# Theme 02: Rocky Linux Advanced Security Controls
+- name: Rocky Linux Security Controls
+  hosts: rocky
+  become: yes
+  tasks:
+    # System Administration
+    - name: Configure logrotate for system logs
+      blockinfile:
+        path: /etc/logrotate.d/syslog
+        block: |
+          /var/log/messages {
+            rotate 7
+            daily
+            compress
+            notifempty
+            missingok
+          }
+      
+    - name: Set up regular system health checks
+      cron:
+        name: "System health check"
+        minute: "0"
+        hour: "*/4"
+        job: "/usr/local/bin/health_check.sh > /var/log/health_check.log 2>&1"
+        
+    # System Hardening
+    - name: Configure password policies
+      lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^# minlen', line: 'minlen = 12' }
+        - { regexp: '^# dcredit', line: 'dcredit = -1' }
+        - { regexp: '^# ucredit', line: 'ucredit = -1' }
+        - { regexp: '^# lcredit', line: 'lcredit = -1' }
+        - { regexp: '^# ocredit', line: 'ocredit = -1' }
+      
+    - name: Enable and configure auditd
+      block:
+        - name: Install audit package
+          dnf:
+            name: audit
+            state: present
+            
+        - name: Configure basic audit rules
+          copy:
+            dest: /etc/audit/rules.d/custom.rules
+            content: |
+              # Log authentication events
+              -w /var/log/auth.log -p wa -k authentication
+              # Monitor sudo usage
+              -w /etc/sudoers -p wa -k sudoers
+            
+        - name: Enable and start auditd service
+          service:
+            name: auditd
+            state: started
+            enabled: yes
+      rescue:
+        - name: Log failure
+          debug:
+            msg: "Failed to configure audit service"
