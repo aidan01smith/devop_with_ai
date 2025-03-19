@@ -21,12 +21,12 @@
         action: allow
         protocol: tcp
         port: 3389
-        remote_ip: "{{ hostvars['MGMT01']['ansible_host'] }}"
+        remote_ip: "{{ hostvars['10.0.5.10']['10.0.5.91']['10.0.5.92'] }}"
         state: present
   
   tasks:
     # System Administration Element 1: Configure Windows Firewall
-    - name: Configure Windows Firewall Rules
+    - name: "Configure Windows Firewall Rules"
       win_firewall_rule:
         name: "{{ item.name }}"
         enable: "{{ item.enable }}"
@@ -39,19 +39,19 @@
       loop: "{{ win_firewall_rules }}"
       register: firewall_config
       
-    - name: Debug Firewall Configuration
+    - name: "Debug Firewall Configuration"
       debug:
         var: firewall_config
         verbosity: 1
     
     # System Administration Element 2: Configure Network Service Optimization
-    - name: Disable IPv6 on all interfaces
+    - name: "Disable IPv6 on all interfaces"
       win_command: netsh interface ipv6 set global state=disabled
       register: ipv6_result
       changed_when: ipv6_result.rc == 0
       failed_when: ipv6_result.rc != 0 and "already disabled" not in ipv6_result.stderr
       
-    - name: Optimize TCP settings
+    - name: "Optimize TCP settings"
       win_regedit:
         path: HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters
         name: "{{ item.name }}"
@@ -64,10 +64,10 @@
       register: tcp_settings
       
     # System Hardening Element 1: Disable Unnecessary Services
-    - name: Disable unnecessary Windows services
+    - name: "Disable unnecessary Windows services"
       win_service:
         name: "{{ item }}"
-        start_mode: disabled
+        start_mode: disabled0
         state: stopped
       loop:
         - XblAuthManager
@@ -83,7 +83,7 @@
         - "'service was not found' not in service_result.msg"
       
     # System Hardening Element 2: Configure SMB Security
-    - name: Disable SMBv1 protocol
+    - name: "Disable SMBv1 protocol"
       win_regedit:
         path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
         name: SMB1
@@ -91,7 +91,7 @@
         type: dword
       register: smb1_config
       
-    - name: Enable SMB Signing
+    - name: "Enable SMB Signing"
       win_regedit:
         path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
         name: "{{ item.name }}"
@@ -103,46 +103,46 @@
       register: smb_signing
 
     # AD DS GPO Hardening Elements for Domain-joined Windows hosts
-    - name: Create GPO for Network Security - Only run on AD01
+    - name: "Create GPO for Network Security"
       win_command: powershell.exe -Command "New-GPO -Name 'Network Security Settings'"
       register: create_gpo
-      when: inventory_hostname == 'AD01'
+      when: inventory_hostname == 'ad01-aidan'
       failed_when: create_gpo.rc != 0 and "already exists" not in create_gpo.stderr
       changed_when: create_gpo.rc == 0
       
-    - name: Configure Network Security GPO Settings - Element 1: Firewall profile settings
+    - name: "Configure Network Security GPO Settings - Element 1: Firewall profile settings"
       win_command: >
         powershell.exe -Command "Set-GPRegistryValue -Name 'Network Security Settings' 
         -Key 'HKLM\Software\Policies\Microsoft\WindowsFirewall\DomainProfile' 
         -ValueName 'EnableFirewall' -Type DWord -Value 1"
-      when: inventory_hostname == 'AD01'
+      when: inventory_hostname == 'ad01-aidan'
       register: gpo_firewall_enable
     
-    - name: Configure Network Security GPO Settings - Element 2: Block outbound connections by default
+    - name: "Configure Network Security GPO Settings - Element 2: Block outbound connections by default"
       win_command: >
         powershell.exe -Command "Set-GPRegistryValue -Name 'Network Security Settings' 
         -Key 'HKLM\Software\Policies\Microsoft\WindowsFirewall\DomainProfile' 
         -ValueName 'DefaultOutboundAction' -Type DWord -Value 1"
-      when: inventory_hostname == 'AD01'
+      when: inventory_hostname == 'ad01-aidan'
       register: gpo_outbound_block
       
-    - name: Configure Network Security GPO Settings - Element 3: Enable Windows Defender Network Protection
+    - name: "Configure Network Security GPO Settings - Element 3: Enable Windows Defender Network Protection"
       win_command: >
         powershell.exe -Command "Set-GPRegistryValue -Name 'Network Security Settings' 
         -Key 'HKLM\Software\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\Network Protection' 
         -ValueName 'EnableNetworkProtection' -Type DWord -Value 1"
-      when: inventory_hostname == 'AD01'
+      when: inventory_hostname == 'ad01-aidan'
       register: gpo_network_protection
       
-    - name: Link Network Security GPO to domain
+    - name: "Link Network Security GPO to domain"
       win_command: >
         powershell.exe -Command "New-GPLink -Name 'Network Security Settings' -Target 'DC=contoso,DC=local' -Enforced Yes"
-      when: inventory_hostname == 'AD01'
+      when: inventory_hostname == 'ad01-aidan'
       register: gpo_link
       failed_when: gpo_link.rc != 0 and "already exists" not in gpo_link.stderr
       changed_when: gpo_link.rc == 0
 
-- name: Network Security and Service Hardening for Rocky Linux Hosts
+- name: "Network Security and Service Hardening for Rocky Linux Hosts"
   hosts: rocky
   become: yes
   gather_facts: yes
@@ -161,20 +161,20 @@
   
   tasks:
     # System Administration Element 1: Configure firewalld
-    - name: Install firewalld if not present
+    - name: "Install firewalld if not present"
       dnf:
         name: firewalld
         state: present
       register: firewalld_install
       
-    - name: Enable and start firewalld
+    - name: "Enable and start firewalld"
       service:
         name: firewalld
         state: started
         enabled: yes
       register: firewalld_service
       
-    - name: Configure firewalld services
+    - name: "Configure firewalld services"
       firewalld:
         service: "{{ item }}"
         permanent: yes
@@ -183,7 +183,7 @@
       register: firewalld_config_services
       notify: reload firewalld
       
-    - name: Configure firewalld ports
+    - name: "Configure firewalld ports"
       firewalld:
         port: "{{ item.port }}"
         permanent: "{{ item.permanent }}"
@@ -194,7 +194,7 @@
       notify: reload firewalld
       
     # System Administration Element 2: Configure sysctl network parameters
-    - name: Set network security sysctl parameters
+    - name: "Set network security sysctl parameters"
       sysctl:
         name: "{{ item.param }}"
         value: "{{ item.value }}"
@@ -212,7 +212,7 @@
       register: sysctl_config
     
     # System Hardening Element 1: Configure SSH security
-    - name: Secure SSH configuration
+    - name: "Secure SSH configuration"
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: "{{ item.regexp }}"
@@ -229,14 +229,14 @@
       notify: restart sshd
       
     # System Hardening Element 2: Configure TCP Wrappers
-    - name: Install TCP Wrappers
+    - name: "Install TCP Wrappers"
       dnf:
         name: tcp_wrappers
         state: present
       register: tcp_wrappers_install
       failed_when: tcp_wrappers_install.failed and "No match for argument" not in tcp_wrappers_install.msg
       
-    - name: Configure hosts.allow - limit SSH access
+    - name: "Configure hosts.allow - limit SSH access"
       lineinfile:
         path: /etc/hosts.allow
         line: "sshd: 10.0.0.0/24 192.168.0.0/24"
@@ -245,7 +245,7 @@
       register: hosts_allow
       when: tcp_wrappers_install is succeeded
       
-    - name: Configure hosts.deny - block all other connections
+    - name: "Configure hosts.deny - block all other connections"
       lineinfile:
         path: /etc/hosts.deny
         line: "ALL: ALL"
@@ -255,12 +255,12 @@
       when: tcp_wrappers_install is succeeded
       
   handlers:
-    - name: reload firewalld
+    - name: "reload firewalld"
       service:
         name: firewalld
         state: reloaded
         
-    - name: restart sshd
+    - name: "restart sshd"
       service:
         name: sshd
         state: restarted
